@@ -7,6 +7,7 @@ void fat_create(struct fat16 *fat, drive_t drive, u32 sectors, const char label[
     const char oem[] = "SEBFAT16";
     const char fs_type[] = "FAT16   ";
 
+    // Setup the BIOS Parameter Block
     struct fat_bpb *bpb = &fat->bpb;
     memcpy(bpb->jump, jump, sizeof(jump));
     memcpy(bpb->oem, oem, 8);
@@ -30,6 +31,7 @@ void fat_create(struct fat16 *fat, drive_t drive, u32 sectors, const char label[
     bpb->hidden_sectors = 0; // Theres no partitioning or anything on this "disk", so 0 is fine
     bpb->large_sector_count = (sectors > 65535) ? sectors : 0; // I mean its accurate regardless of if its used
 
+    // Set up Extended Boot Record
     struct fat_ebr *ebr = &fat->ebr;
     ebr->drive = 0x80; // First fixed disk, as per BIOS INT 0x13
     ebr->reserved1 = 0x00; // Reserved, just zero
@@ -42,12 +44,40 @@ void fat_create(struct fat16 *fat, drive_t drive, u32 sectors, const char label[
 
     // Commit boot sector to disk
     drive_write(drive, 0, (u8*)fat);
-
     fat->drive = drive;
+
+    // The first two FAT entries store special values, so do that!
+    u8 fat_sector[SECTOR_SIZE];
+    memset(fat_sector, '\0', SECTOR_SIZE);
+    fat_sector[0] = bpb->media_type;
+    fat_sector[1] = 0xFF;
+    fat_sector[2] = 0xFF;
+    fat_sector[3] = 0xFF;
+    for (int i = 0; i < bpb->fats; i++) {
+        u32 fat_first_sector = bpb->reserved_sectors + (i * bpb->sectors_per_fat);
+        drive_write(drive, fat_first_sector, (u8*)fat_sector);
+    }
+
+    // Now zero-out the rest of the fat tables, reusing the previous fat_sector buffer with a little cleanup
+    // Inefficient, yes, but 
+    memset(fat_sector, '\0', sizeof(u16)*2);
+    for (int i = 0; i < bpb->fats; i++) {
+        u32 fat_first_sector = bpb->reserved_sectors + (i * bpb->sectors_per_fat);
+        for (int j = 0; j < bpb->sectors_per_fat; j++)
+            drive_write(drive, fat_first_sector+j+1, (u8*)fat_sector);
+    }
+
+    // Populate root directory
+    struct fat_entry entries[SECTOR_SIZE/sizeof(struct fat_entry)];
+    memset(entries, '\0', sizeof(entries));
+    u32 root_sector = bpb->reserved_sectors + (bpb->fats * bpb->sectors_per_fat);
+    u32 num_root_sectors = (bpb->root_entries*sizeof(struct fat_entry))/SECTOR_SIZE;
+    for (u32 i = 0; i < num_root_sectors; i++)
+        drive_write(drive, root_sector+i, (u8*)entries);
 }
 
 void fat_load(struct fat16 *fat, drive_t drive)
 {
-    drive_read(drive, 0, fat);
+    drive_read(drive, 0, (u8*)fat);
     fat->drive = drive;
 }
